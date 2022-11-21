@@ -1,10 +1,24 @@
 #!/bin/bash
 
+# Code to be used in /usr/local/bin/block-advert.sh
+
+# Improvements to this script:
+# -- Use StevenBlack's unified hosts file ( github.com/StevenBlack/hosts )
+#	 This is what pihole uses by default
+#	 This unifies most of the lists previously present in antiX advert blocker + other useful lists
+# -- Options to select StevenBlack's hosts file extensions
+#	 ie. options to block fakenews, gambling, porn , social media -- can be useful for parental control , content filtering etc.,
+# -- Compress 9 lines in 1 for lesser file size , much lesser number of lines ( about 10x ) and better performance ( as StevenBlack's updateHostsFile.py can do -- https://github.com/StevenBlack/hosts/pull/459)
+# -- Do all work in a random subdirectory of /tmp ( not in /tmp as it was before ) for more security, less clutter and less conflicts 
+# -- Show a warning if not running as root / sudo 
+# -- Update the welcome message to reflect these
+
 #v0.4 created by sc0ttman, August 2010
 #GPL license /usr/share/doc/legal/gpl-2.0.txt
 #100830 BK added GPL license, amended Exit msg, bug fixes.
 # zenity version by lagopus for antiX, Decemder 2010
 # modified to yad by Dave for antiX, September 2011
+# added sysctl, Jan 2020
 # fix update URL to mvps
 
 # advert blocker
@@ -13,18 +27,21 @@
 # many online adverts are blocked from sight
 
 TEXTDOMAINDIR=/usr/share/locale
-TEXTDOMAIN=block-advert.sh
+TEXTDOMAIN=block-advert
 
 export title="antiX Advert Blocker"
 
 # the markers used to find the changes in /etc/hosts, which are made by this app
-export markerstart='# antiX-advert-blocker IPs below'
-export markerend='# antiX-advert-blocker IPs above'
+export markerstart='# BEGIN (below) - IPs added by antiX Advert Blocker #'
+export markerend='# END (above) - IPs added by antiX Advert Blocker #'
+
+# Do all work inside a random subdirectory of /tmp , as many modern apps do for security, less clutter etc.,
+WORKINGDIR=/tmp/antiXadvertblocker.$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8 ; echo '')
+mkdir $WORKINGDIR
 
 info_text=$"The <b>$title</b> tool adds stuff to your /etc/hosts file, so \n\
-that many advertising servers and websites will not be able to connect \n\
-to this PC.\n\n\
-You can choose one service or combine multiple services for more advert protection.\n\
+that many advertising servers and websites can't connect to this PC.\n\
+You can choose to block ads, malware, pornography, gambling, fakenews and social media\n\
 Blocking ad servers protects your privacy, saves you bandwidth, greatly \n\
 improves web-browsing speed and makes the internet much less annoying in general.\n\n\
 Do you want to proceed?"
@@ -32,64 +49,112 @@ Do you want to proceed?"
 # width of progress dialogs
 WIDTH=360
 
+if [ $(whoami) != root ] ; then
+	yad --image "info" --title "$title" --text=$"<b> Failed </b> \n\n\
+	antiX advert blocker must be run as root or with sudo "
+	exit 1
+fi
+
 # cleanup all leftover files
 function cleanup
 {
     # remove all temp files
-    rm -f /tmp/adlist{1,2,3,4} /tmp/adlist-all /tmp/hosts-temp
+    rm -rf $WORKINGDIR/*
 }
 
 # concatenate the downloaded files
 # clean out everything but the list of IPs and servers
-function build_adlist_all
+function build_blocklist_all
 {
+
     #echo "====================YTO"
-    # suppress comments, then empty lines, replace tabs by spaces
-    # remove double spaces, remove lines not beginning by a number,
+    # suppress comments anywhere in a line ( not just at the beginning ) , then empty lines, replace tabs by spaces
+    # remove double spaces, remove lines not beginning with "0.0.0.0" ,
     # suppress \r at end of line
     # then sort unique by field 2 (url)
-    cat /tmp/adlist{1,2,3,4} | sed '/^#/d' | \
+    cat $WORKINGDIR/blocklist{1,2,3,4,5} | sed 's:#.*$::g' | \
                                sed '/^$/d' | \
                                sed 's/[\t]/ /g' | \
                                sed 's/  / /g' | \
-                               sed -n '/^[0-9]/p' | \
+                               sed -n '/^["0\.0\.0\.0"]/p' | \
                                tr -d '\015' | \
                                sort -u -k 2 \
-                               > /tmp/adlist-all
+                               > $WORKINGDIR/blocklist-all
     #echo "====================YTO"
+    
+    # Compress 9 lines into 1
+    # This is taken from StevenBlack's updateHostsFile.py
+    # This will decrease file size , decrease number of lines drastically ( about 10x ) and increase performance
+    # Writing it in bash seems too slow. So, we use python, which is faster here
+	cat << EndOfFile > $WORKINGDIR/compress.py
+#!/usr/bin/python3
+import subprocess
+import os
+	
+f = open( "$WORKINGDIR/blocklist-all" , "r+" )
+f.seek(0)  # reset file pointer
+    
+target_ip = "0.0.0.0"
+target_ip_len = len(target_ip)
+lines = [target_ip]
+lines_index = 0
+for line in f.readlines():
+	if line.startswith(target_ip):
+		if lines[lines_index].count(" ") < 9:
+			lines[lines_index] += (
+				" " + line[target_ip_len : line.find("#")].strip()  # remove comments
+			)
+		else:
+			lines[lines_index] += "\n"
+			lines.append(line[: line.find("#")].strip()) # remove comments
+			lines_index += 1
+# Sort and remove duplicates
+CleanedLines = sorted(set(lines))
+
+f.truncate(0) # Clear contents of f
+f.seek(0) # Move pointer to start of file
+	
+for line in CleanedLines:
+	f.write(line)
+
+f.close()
+	
+EndOfFile
+
+	chmod +x $WORKINGDIR/compress.py
+	$WORKINGDIR/compress.py	
+
 }
 
 
 # append the list to the /etc/hosts
-function append_adlist
+function append_blocklist
 {
 	# copy /etc/hosts, but the stuff between the markers, to a temp hosts file
-	sed -e "/$markerstart/,/$markerend/d" /etc/hosts > /tmp/hosts-temp
+	sed -e "/$markerstart/,/$markerend/d" /etc/hosts > $WORKINGDIR/hosts-temp
 	# remove the markers
-	sed -i -e "/$markerstart/d" /tmp/hosts-temp
-	sed -i -e "/$markerend/d"   /tmp/hosts-temp
+	sed -i -e "/$markerstart/d" $WORKINGDIR/hosts-temp
+	sed -i -e "/$markerend/d"   $WORKINGDIR/hosts-temp
     
-	# check the size of the final adlist - if UNBLOCK is chosen, it will be 0.
-    size=$(stat -c%s /tmp/adlist-all 2>/dev/null)
-    #echo $size
-	if [ -n "$size" ] && [ "$size" -gt "0" ];then
-		# add list contents into the hosts file, below a marker (for easier removal)
-		echo "$markerstart" >> /tmp/hosts-temp
-		cat /tmp/adlist-all >> /tmp/hosts-temp
-		echo "$markerend"   >> /tmp/hosts-temp
-	else
+	if [ "$unblock" = true ] ; then
 		yad --image="info" --title "$title" --text=$"Restoring original /etc/hosts."
         exit 1
+	else
+		# add list contents into the hosts file, below a marker (for easier removal)
+		echo "$markerstart" >> $WORKINGDIR/hosts-temp
+		echo "# These kinds of sites are blocked : $what_to_block" >> $WORKINGDIR/hosts-temp # Show what blocking options are used
+		cat $WORKINGDIR/blocklist-all >> $WORKINGDIR/hosts-temp
+		echo "$markerend" >> $WORKINGDIR/hosts-temp
 	fi
     # On first use backup original /etc/hosts to /etc/hosts.ORIGINAL
     # If /etc/hosts.original exists, then backup to /etc/hosts.saved
     if [ -f /etc/hosts.ORIGINAL ]; then
     cp "/etc/hosts" "/etc/hosts.saved"
-    mv "/tmp/hosts-temp" "/etc/hosts"
+    mv $WORKINGDIR/hosts-temp "/etc/hosts"
     else
     cp "/etc/hosts" "/etc/hosts.ORIGINAL"
     cp "/etc/hosts" "/etc/hosts.saved"
-    mv "/tmp/hosts-temp" "/etc/hosts"
+    mv $WORKINGDIR/hosts-temp /etc/hosts
     fi
 }
 
@@ -114,44 +179,29 @@ function wget_dialog
     wget -c -4 -t 20 -T 10 --progress=dot -O $2 "$1" 2>&1 | \
         awk '{print $7}; system("")' | sed -u 's/%//' | \
         yad --title "$title" --progress --width $WIDTH \
-               --text=$"Loading  adlist from $domain" \
+               --text=$"Loading  blocklist from $domain" \
                --percentage=0 \
                --auto-close
 }
 
 # download the ads lists
-function download_adlist
-{
-    # mvps
-    if [ "$mvps" = true ]; then
-        wget_dialog http://winhelp2002.mvps.org/hosts.txt /tmp/adlist1 # TP fix update URL 
-    fi
-    sed -i 's/0.0.0.0/127.0.0.1/' /tmp/adlist1 # TP fix to change 0.0.0.0 to 127.0.0.1 in mvps list
-    sed -i 's/ #.*$//' /tmp/adlist1 # TP fix to remove comments in mvps list
-
-    # someonewhocares
-    if [ "$someonewhocares" = true ]; then
-        wget_dialog http://someonewhocares.org/hosts/hosts /tmp/adlist2
-    fi
-
-    # yoyo
-    if [ "$yoyo" = true ]; then
-        wget_dialog 'http://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext' /tmp/adlist3
-    fi
-     
-    # adservers
-    if [ "$adservers" = true ]; then
-        wget_dialog http://hosts-file.net/ad_servers.asp /tmp/adlist4
-    fi
-
+function download_blocklist
+{	
     # UNBLOCK
-    if [ "$unblock" = true ]; then
+    if [ "$unblock" == "true" ]; then
         mv -f "/etc/hosts.ORIGINAL" "/etc/hosts" 
         rm -f "/etc/hosts.saved"
-    fi
+    elif [ -z $what_to_block ] ; then
+		# StevenBlack's basic blocklist ( blocks adware, malware etc., ) , without any other extensions
+		wget_dialog https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts $WORKINGDIR/blocklist1
+	else 
+		# StevenBlack's blocklist with selected extensions
+		wget_dialog "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/"$what_to_block"/hosts" $WORKINGDIR/blocklist1
+	fi
+		
 
     #100830 BK bug fix: create if not exist...
-    touch /tmp/adlist{1,2,3,4} 
+    touch $WORKINGDIR/blocklist{1,2,3,4,5} 
 }
 
 
@@ -177,15 +227,16 @@ fi
 
 # selection dialog
 ans=$(yad --title "$title" \
-             --width "$WIDTH" --height 220 \
+             --width "$WIDTH" --height 250 \
              --list --separator=":" \
-             --text $"Choose your preferred ad blocking service(s)" \
-             --checklist  --column "Pick" --column "Service"\
-             FALSE "mvps.org" \
-             FALSE "someonewhocares.org" \
-             FALSE "yoyo.org" \
-             FALSE "adservers.org" \
-             FALSE "UNBLOCK" )
+             --text $"Choose what to block" \
+             --checklist  --column "Pick" --column "To be blocked"\
+             TRUE "Block_Ad_and_Malware_websites" \
+             TRUE "Block_Pornographic_websites" \
+             TRUE "Block_Gambling_websites" \
+             TRUE "Block_Fakenews_websites" \
+             FALSE "Block_Social_Media_websites" \
+             FALSE "UNBLOCK_everything" )
 
 #echo $ans
 
@@ -193,32 +244,61 @@ ans=$(yad --title "$title" \
 arr=$(echo $ans | tr ":" "\n")
 
 selected=""
+what_to_block=""
 for x in $arr
 do
     #echo "> [$x]"
+    
     case $x in
-    mvps.org)
-        mvps='true'
+    Block_Fakenews_websites)
+        block_fakenews='true'
         selected='yes'
         ;;
-    someonewhocares.org)
-        someonewhocares='true'
+    Block_Gambling_websites)
+        block_gambling='true'
         selected='yes'
         ;;
-    yoyo.org)
-        yoyo='true'
+    Block_Pornographic_websites)
+        block_porn='true'
         selected='yes'
         ;;
-    adservers.org)
-        adservers='true'
+    Block_Social_Media_websites)
+        block_social_media='true'
         selected='yes'
         ;;
-    UNBLOCK)
+    Block_Ad_and_Malware_websites)
+        block_ads_and_malware='true'
+        selected='yes'
+        ;;
+    UNBLOCK_everything)
         unblock='true'
         selected='yes'
         ;;
     esac    
 done
+
+# Convert it into a pattern for the download link
+# This code is in the order of StevenBlack's hosts links to download
+# Wrong order will make the download link invalid
+# The order of these extensions is fakenews-gambling-porn-social
+if [ "$block_fakenews" == true ] ; then
+	what_to_block=$(echo "fakenews-")
+fi
+
+if [ "$block_gambling" == true ] ; then
+	what_to_block=$(echo $what_to_block"gambling-")
+fi
+
+if [ "$block_porn" == true ] ; then
+	what_to_block=$(echo $what_to_block"porn-")
+fi
+
+if [ "$block_social_media" == true ] ; then
+	what_to_block=$(echo $what_to_block"social-")
+fi
+
+# Remove the trailing hyphen, if any. This is to make it compatible to StevenBlack's hosts download link
+what_to_block=$(echo ${what_to_block%-})
 
 if [ -z $selected ]; then
     # nothing selected
@@ -227,8 +307,8 @@ if [ -z $selected ]; then
 fi
 
 cleanup
-download_adlist
-build_adlist_all
-append_adlist
+download_blocklist
+build_blocklist_all
+append_blocklist
 cleanup
 success
